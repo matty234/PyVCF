@@ -18,12 +18,12 @@ except ImportError:
     pysam = None
 
 try:
-    import cparse
+    from . import cparse
 except ImportError:
     cparse = None
 
-from model import _Call, _Record, make_calldata_tuple
-from model import _Substitution, _Breakend, _SingleBreakend, _SV
+from .model import _Call, _Record, make_calldata_tuple
+from .model import _Substitution, _Breakend, _SingleBreakend, _SV
 
 
 # Metadata parsers/constants
@@ -275,7 +275,7 @@ class Reader(object):
             self._separator = '\t| +'
 
         self._row_pattern = re.compile(self._separator)
-        self._alt_pattern = re.compile('[\[\]]')
+        self._alt_pattern = re.compile(r'[\[\]]')
 
         self.reader = (line.strip() for line in self._reader if line.strip())
 
@@ -428,52 +428,27 @@ class Reader(object):
 
         return retdict
 
-    def _parse_sample_format(self, samp_fmt):
-        """ Parse the format of the calls in this _Record """
-        samp_fmt = make_calldata_tuple(samp_fmt.split(':'))
-
-        for fmt in samp_fmt._fields:
-            try:
-                entry_type = self.formats[fmt].type
-                entry_num = self.formats[fmt].num
-            except KeyError:
-                entry_num = None
-                try:
-                    entry_type = RESERVED_FORMAT[fmt]
-                except KeyError:
-                    entry_type = 'String'
-            samp_fmt._types.append(entry_type)
-            samp_fmt._nums.append(entry_num)
-        return samp_fmt
+    def _parse_sample_format(self, samp_fmt_str):
+        """ Parse the format of the sample fields"""
+        if samp_fmt_str not in self._format_cache:
+            format_class = make_calldata_tuple(samp_fmt_str.split(':'))
+            self._format_cache[samp_fmt_str] = format_class
+        return self._format_cache[samp_fmt_str]
 
     def _parse_samples(self, samples, samp_fmt, site):
-        '''Parse a sample entry according to the format specified in the FORMAT
-        column.
+        """Parse all the samples fields"""
 
-        NOTE: this method has a cython equivalent and care must be taken
-        to keep the two methods equivalent
-        '''
+        samp_data = [
+            dict(zip(samp_fmt._fields, samp.split(':')))
+            for samp in samples]
 
-        # check whether we already know how to parse this format
-        if samp_fmt not in self._format_cache:
-            self._format_cache[samp_fmt] = self._parse_sample_format(samp_fmt)
-        samp_fmt = self._format_cache[samp_fmt]
-
-        if cparse:
-            return cparse.parse_samples(
-                self.samples, samples, samp_fmt, samp_fmt._types, samp_fmt._nums, site)
-
-        samp_data = []
-        _map = self._map
-
-        nfields = len(samp_fmt._fields)
-
-        for name, sample in itertools.izip(self.samples, samples):
+        # list of values for each sample
+        for name, sample in zip(self.samples, samp_data):
 
             # parse the data for this sample
-            sampdat = [None] * nfields
+            sampdat = [None] * len(samp_fmt._fields)
 
-            for i, vals in enumerate(sample.split(':')):
+            for i, vals in enumerate(sample.values()):
 
                 # short circuit the most common
                 if samp_fmt._fields[i] == 'GT':
@@ -506,11 +481,11 @@ class Reader(object):
                 vals = vals.split(',')
                 if entry_type == 'Integer':
                     try:
-                        sampdat[i] = _map(int, vals)
+                        sampdat[i] = self._map(int, vals)
                     except ValueError:
-                        sampdat[i] = _map(float, vals)
+                        sampdat[i] = self._map(float, vals)
                 elif entry_type == 'Float' or entry_type == 'Numeric':
-                    sampdat[i] = _map(float, vals)
+                    sampdat[i] = self._map(float, vals)
                 else:
                     sampdat[i] = vals
 
@@ -521,40 +496,37 @@ class Reader(object):
         return samp_data
 
     def _parse_alt(self, str):
-        if self._alt_pattern.search(str) is not None:
-            # Paired breakend
-            items = self._alt_pattern.split(str)
-            remoteCoords = items[1].split(':')
-            chr = remoteCoords[0]
-            if chr[0] == '<':
-                chr = chr[1:-1]
-                withinMainAssembly = False
-            else:
-                withinMainAssembly = True
-            pos = remoteCoords[1]
-            orientation = (str[0] == '[' or str[0] == ']')
-            remoteOrientation = (re.search('\[', str) is not None)
-            if orientation:
-                connectingSequence = items[2]
-            else:
-                connectingSequence = items[0]
-            return _Breakend(chr, pos, orientation, remoteOrientation, connectingSequence, withinMainAssembly)
-        elif str[0] == '.' and len(str) > 1:
-            return _SingleBreakend(True, str[1:])
-        elif str[-1] == '.' and len(str) > 1:
-            return _SingleBreakend(False, str[:-1])
-        elif str[0] == "<" and str[-1] == ">":
-            return _SV(str[1:-1])
-        else:
+        # The A]1] syntax indicates that A is on a remote contig.
+        # It is followed by a colon, which is not part of the seq.
+        # So we don't need to look for that.
+        if self._alt_pattern.search(str) is None:
             return _Substitution(str)
+        else:
+            # The A]1] syntax indicates that A is on a remote contig.
+            remoteOrientation = (re.search(r'\[', str) is not None)
+            # The ]A]1 syntax indicates that A is on a remote contig.
+            # The [A[1 syntax indicates that A is on a remote contig.
+            if remoteOrientation:
+                items = self._alt_pattern.split(str)
+                remoteCoords = items[1].split(':')
+                return _Breakend(remoteCoords[0], remoteCoords[1],
+                        remoteOrientation,
+                        (re.search(r'\]', str) is not None), items[0])
+            else:
+                return _SingleBreakend(None, None, None, None, str)
 
-    def next(self):
+
+    def __next__(self):
         '''Return the next record in the file.'''
-        line = next(self.reader)
-        row = self._row_pattern.split(line.rstrip())
+        try:
+            line = next(self.reader)
+        except StopIteration:
+            raise
+        row = self._row_pattern.split(line.strip())
         chrom = row[0]
         if self._prepend_chr:
-            chrom = 'chr' + chrom
+            if not chrom.startswith('chr'):
+                chrom = 'chr' + chrom
         pos = int(row[1])
 
         if row[2] != '.':
@@ -576,22 +548,24 @@ class Reader(object):
         filt = self._parse_filter(row[6])
         info = self._parse_info(row[7])
 
+        site = _Record(chrom, pos, ID, ref, alt, qual, filt,
+                info, None, self._sample_indexes)
+
         try:
-            fmt = row[8]
+            fmt = self._parse_sample_format(row[8])
+            samples = self._parse_samples(row[9:], fmt, site)
+            site.FORMAT = fmt
+            site.samples = samples
         except IndexError:
             fmt = None
-        else:
-            if fmt == '.':
-                fmt = None
+            samples = []
+            site.samples = samples
 
-        record = _Record(chrom, pos, ID, ref, alt, qual, filt,
-                info, fmt, self._sample_indexes)
+        # Fill in references to site for sample calls
+        for sample in samples:
+            sample.site = site
 
-        if fmt is not None:
-            samples = self._parse_samples(row[9:], fmt, record)
-            record.samples = samples
-
-        return record
+        return site
 
     def fetch(self, chrom, start=None, end=None):
         """ Fetches records from a tabix-indexed VCF file and returns an
@@ -641,7 +615,7 @@ class Writer(object):
     """VCF Writer. On Windows Python 2, open stream with 'wb'."""
 
     # Reverse keys and values in header field count dictionary
-    counts = dict((v,k) for k,v in field_counts.iteritems())
+    counts = dict((v,k) for k,v in field_counts.items())
 
     def __init__(self, stream, template, lineterminator="\n"):
         self.writer = csv.writer(stream, delimiter="\t",
