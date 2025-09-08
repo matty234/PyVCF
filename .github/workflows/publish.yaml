@@ -14,7 +14,7 @@ jobs:
       id-token: write # IMPORTANT: this permission is mandatory for trusted publishing
     defaults:
       run:
-        working-directory: ./src
+        working-directory: ./
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -27,15 +27,15 @@ jobs:
       - name: Install dependencies
         run: |
           python3 -m pip install --upgrade pip
-          pip install build
+          pip install setuptools wheel Cython
 
       - name: Build package
         run: |
-          python3 -m pip install --upgrade build
-          python3 -m build
+          python3 setup.py build
+          python3 setup.py sdist bdist_wheel
 
       - name: Publish package to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          packages-dir: ./src/dist/
+          packages-dir: ./dist/
           repository-url: https://test.pypi.org/legacy/
