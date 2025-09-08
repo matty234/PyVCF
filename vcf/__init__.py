@@ -12,4 +12,4 @@ from .filters import Base as Filter
 from .parser import RESERVED_INFO, RESERVED_FORMAT
 from .sample_filter import SampleFilter
 
-VERSION = '0.6.8'
+VERSION = '0.6.9'
